@@ -5,9 +5,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
 import torchvision.transforms as transforms
-from dfb import DirectionalFilterBank
+from soft_dfb import DirectionalFilterBank
 from enhancer import FingerprintEnhancer
+from robust_enhancer import RobustFingerprintEnhancer
 import os
+import cv2
 
 def load_image(path, device='cpu'):
     if not os.path.exists(path): return None
@@ -21,31 +23,45 @@ def load_image(path, device='cpu'):
     transform = transforms.ToTensor()
     return transform(img).unsqueeze(0).to(device)
 
-def save_image(tensor, path, binarize=False):
+def save_image_adaptive(tensor, path):
     """
-    Lưu ảnh với xử lý hậu kỳ để loại bỏ màu xám:
-    1. Robust Normalization: Kéo dãn histogram, loại bỏ outlier.
-    2. Binarization (Optional): Chuyển về đen trắng tuyệt đối (như bài báo).
+    Hàm lưu ảnh thông minh:
+    1. Robust Normalization cho ảnh Gray.
+    2. Adaptive Binarization cho ảnh Binary (Khắc phục đứt đoạn).
     """
     img = tensor.squeeze().cpu().detach().numpy()
     
-    # Robust Normalization (Khử màu xám) 
-    # Thay vì lấy min/max tuyệt đối (dễ bị nhiễu hạt muối tiêu làm hỏng), ta lấy phân vị thứ 1 và 99 để bỏ qua nhiễu biên.
-    p1 = np.percentile(img, 1)
-    p99 = np.percentile(img, 99)
-    img = np.clip(img, p1, p99)
-    img = (img - p1) / (p99 - p1 + 1e-8)
+    # --- 1. Robust Normalize (cho ảnh xám) ---
+    p5 = np.percentile(img, 5)   # Lấy phân vị 5% (tránh nhiễu đen)
+    p95 = np.percentile(img, 95) # Lấy phân vị 95% (tránh nhiễu trắng)
+    img_norm = np.clip((img - p5) / (p95 - p5 + 1e-8), 0, 1)
     
-    # Xử lý Gamma (Tăng tương phản trung gian), giúp làm tối phần đen và sáng phần trắng hơn
-    img = img ** 2.0  # Gamma > 1 làm ảnh đậm hơn, ridges rõ hơn
+    # Lưu ảnh Enhanced Gray
+    plt.imsave(path.replace('.jpg', '_gray.jpg'), img_norm, cmap='gray')
     
-    # Binarization (Theo paper cua Oh et al. )
-    if binarize:
-        # Ngưỡng đơn giản hoặc dùng Otsu (thư viện ngoài
-        img = (img > 0.35).astype(float)
+    # --- 2. Adaptive Binarization (QUAN TRỌNG) ---
+    # Chuyển về 8-bit integer [0, 255]
+    img_uint8 = (img_norm * 255).astype(np.uint8)
     
-    plt.imsave(path, img, cmap='gray')
+    # Dùng Gaussian Adaptive Thresholding
+    # Block Size: 15 (hoặc 31 tùy độ phân giải), C: hằng số trừ đi (thường là 2-10)
+    # Kỹ thuật này tính ngưỡng riêng cho từng vùng nhỏ, giúp nối liền vân tay ngay cả khi bị mờ.
+    binarized = cv2.adaptiveThreshold(
+        img_uint8, 
+        255, 
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        cv2.THRESH_BINARY, # Nền trắng, vân đen -> Dùng THRESH_BINARY. Nếu muốn nền đen vân trắng -> THRESH_BINARY_INV
+        blockSize=15, 
+        C=5
+    )
+    
+    # Bài báo thường show nền trắng, vân đen.
+    # Nếu kết quả ra nền đen, ta đảo ngược lại:
+    # binarized = 255 - binarized
+    
+    cv2.imwrite(path.replace('.jpg', '_binary.jpg'), binarized)
     print(f"Saved {path}")
+    return img_norm, binarized
 
 def visualize_subbands(subbands, path):
     fig, axes = plt.subplots(2, 4, figsize=(16, 8))
@@ -58,11 +74,12 @@ def visualize_subbands(subbands, path):
             ax.set_title(f'Band {i}')
             ax.axis('off')
     plt.savefig(path)
+    print(f"Saved {path}")
     plt.close()
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
+    print(f"Using device: {device}")
     img = load_image('fingerprint.jpg', device)
     if img is None:
         print("Image not found, creating dummy.")
@@ -70,38 +87,27 @@ def main():
 
     # Sử dụng DFB FFT
     dfb = DirectionalFilterBank(num_bands=8, device=device)
-    enhancer = FingerprintEnhancer(dfb, block_size=16)
-    
-    print("Running enhancement...")
+    enhancer = RobustFingerprintEnhancer(dfb, denoise_strength=0.75, block_size=16)
+    # enhancer = FingerprintEnhancer(dfb, block_size=16)
     enhanced_img, subbands = enhancer.enhance(img)
     
-    visualize_subbands(subbands, 'subbands_vis.png')
-    save_image(enhanced_img, 'enhanced_fingerprint.jpg', binarize=False)
-    save_image(enhanced_img, 'enhanced_fingerprint_binary.jpg', binarize=True)
+    visualize_subbands(subbands, 'result_robustenhancer/subbands_vis.png')
+    gray_res, bin_res = save_image_adaptive(enhanced_img, 'result_robustenhancer/final_result.jpg')
     
-    fig, ax = plt.subplots(1, 3, figsize=(18, 6)) 
-
-    img_np = img.squeeze().cpu().detach().numpy()
-    ax[0].imshow(img_np, cmap='gray')
+    fig, ax = plt.subplots(1, 3, figsize=(18, 6))
+    ax[0].imshow(img.squeeze().cpu().detach().numpy(), cmap='gray')
     ax[0].set_title('Original')
     ax[0].axis('off')
-
-    res_np = enhanced_img.squeeze().cpu().detach().numpy()
-    p1, p99 = np.percentile(res_np, 1), np.percentile(res_np, 99)
-    res_np = np.clip((res_np - p1)/(p99 - p1 + 1e-8), 0, 1)
     
-    ax[1].imshow(res_np, cmap='gray')
-    ax[1].set_title('Enhanced')
+    ax[1].imshow(gray_res, cmap='gray')
+    ax[1].set_title('Enhanced (Normalized)')
     ax[1].axis('off')
-
-    bin_np = (res_np > 0.57).astype(float)
-    ax[2].imshow(bin_np, cmap='gray')
-    ax[2].set_title('Binarized Result')
+    
+    ax[2].imshow(bin_res, cmap='gray')
+    ax[2].set_title('Adaptive Binary')
     ax[2].axis('off')
     
-    plt.tight_layout()
-    plt.savefig('comparison_result.png')
-    print("Saved comparison_result.png")
+    plt.savefig('result_robustenhancer/comparison_final.png')
 
 if __name__ == '__main__':
     main()
