@@ -15,7 +15,8 @@ class DirectionalFilterBank(nn.Module):
         Tương ứng với Ideal DFB partition (Hình 1 trong Bamberger 1992).
         """
         H, W = shape
-        # Tạo lưới toạ độ tần số (Frequency Grid), Shifted: Gốc (0,0) nằm giữa ảnh
+        # Tạo lưới toạ độ tần số (Frequency Grid)
+        # Shifted: Gốc (0,0) nằm giữa ảnh
         y = torch.arange(H, device=self.device) - H // 2
         x = torch.arange(W, device=self.device) - W // 2
         Y, X = torch.meshgrid(y, x, indexing='ij')
@@ -25,24 +26,34 @@ class DirectionalFilterBank(nn.Module):
         
         masks = []
         # Chia [-pi, pi] thành 8 phần. Mỗi phần rộng pi/4 (vì DFB đối xứng qua gốc)
+        # Thực tế DFB 8 bands chia nửa mặt phẳng thành 8 hướng, nhưng phổ tần số đối xứng.
+        # Ta tạo 8 filters, mỗi filter bao phủ một góc alpha và đối xứng của nó (alpha + pi).
+        
         step = np.pi / self.num_bands # pi / 8
         
         for k in range(self.num_bands):
-            start_angle = k * step - np.pi/2 
+            # Góc trung tâm của band k
+            # Bamberger sắp xếp hướng hơi khác, nhưng ta dùng thứ tự tuyến tính:
+            # 0: Vertical, 4: Horizontal...
+            # Để khớp với thị giác, ta xoay góc bắt đầu một chút.
+            
+            start_angle = k * step - np.pi/2 # Bắt đầu từ trục dọc
             end_angle = (k + 1) * step - np.pi/2
             
             # Tạo mask
             # Điểm (u,v) thuộc mask k nếu góc của nó nằm trong [start, end]
-            # HOẶC nằm trong [start + pi, end + pi] 
+            # HOẶC nằm trong [start + pi, end + pi] (do tính đối xứng của phổ thực)
             
-            # Xử lý wrap-around pha pi: dùng cos để đo khoảng cách góc
+            # Xử lý wrap-around pha pi
+            # Cách đơn giản: dùng cos để đo khoảng cách góc
             center_angle = (start_angle + end_angle) / 2
             
-            # Khoảng cách góc: cos(a - b) càng gần 1 thì càng gần nhau. 
+            # Khoảng cách góc
+            # cos(a - b) càng gần 1 thì càng gần nhau. 
             # Dùng sigmoid để làm mềm biên (giảm ringing artifact)
-            # hoặc dùng Hard threshold (như Ideal DFB). 
+            # hoặc dùng Hard threshold (như Ideal DFB). Dùng Hard threshold cho đúng lý thuyết.
             
-            # Chuẩn hóa angle về range [0, pi] để so sánh (do đối xứng)
+            # Chuẩn hóa angle về range [0, pi] để so sánh cho dễ (do đối xứng)
             angles_mod = angles % np.pi
             start_mod = start_angle % np.pi
             end_mod = end_angle % np.pi
@@ -62,21 +73,21 @@ class DirectionalFilterBank(nn.Module):
         """
         B, C, H, W = x.shape
         
-        # FFT
+        # 1. FFT
         # x là thực, dùng rfft2 hoặc fft2. Dùng fft2 đầy đủ để dễ xử lý mask đối xứng.
         fft_x = torch.fft.fftshift(torch.fft.fft2(x))
         
-        # Generate Masks (Lazy init)
+        # 2. Generate Masks (Lazy init)
         if not hasattr(self, 'masks') or self.masks.shape[-2:] != (H, W):
             self.masks = self.generate_angular_masks((H, W))
             
-        # Apply Masks
+        # 3. Apply Masks
         subbands = []
         for k in range(self.num_bands):
             mask = self.masks[k].unsqueeze(0).unsqueeze(0) # (1, 1, H, W)
             fft_masked = fft_x * mask
             
-            # IFFT
+            # 4. IFFT
             # Lấy phần thực vì ảnh vân tay là số thực
             sb = torch.real(torch.fft.ifft2(torch.fft.ifftshift(fft_masked)))
             subbands.append(sb)
