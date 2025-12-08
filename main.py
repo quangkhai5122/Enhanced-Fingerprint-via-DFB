@@ -14,7 +14,6 @@ import cv2
 def load_image(path, device='cpu'):
     if not os.path.exists(path): return None
     img = Image.open(path).convert('L')
-    # Resize về kích thước chẵn để FFT chạy nhanh và chuẩn
     w, h = img.size
     new_w = (w // 16) * 16
     new_h = (h // 16) * 16
@@ -24,41 +23,25 @@ def load_image(path, device='cpu'):
     return transform(img).unsqueeze(0).to(device)
 
 def save_image_adaptive(tensor, path):
-    """
-    Hàm lưu ảnh thông minh:
-    1. Robust Normalization cho ảnh Gray.
-    2. Adaptive Binarization cho ảnh Binary (Khắc phục đứt đoạn).
-    """
     img = tensor.squeeze().cpu().detach().numpy()
     
-    # --- 1. Robust Normalize (cho ảnh xám) ---
-    p5 = np.percentile(img, 5)   # Lấy phân vị 5% (tránh nhiễu đen)
-    p95 = np.percentile(img, 95) # Lấy phân vị 95% (tránh nhiễu trắng)
+    # 1. Robust Normalize (cho ảnh xám)
+    p5 = np.percentile(img, 5)   
+    p95 = np.percentile(img, 95) 
     img_norm = np.clip((img - p5) / (p95 - p5 + 1e-8), 0, 1)
-    
-    # Lưu ảnh Enhanced Gray
     plt.imsave(path.replace('.jpg', '_gray.jpg'), img_norm, cmap='gray')
     
-    # --- 2. Adaptive Binarization (QUAN TRỌNG) ---
-    # Chuyển về 8-bit integer [0, 255]
-    img_uint8 = (img_norm * 255).astype(np.uint8)
-    
-    # Dùng Gaussian Adaptive Thresholding
-    # Block Size: 15 (hoặc 31 tùy độ phân giải), C: hằng số trừ đi (thường là 2-10)
-    # Kỹ thuật này tính ngưỡng riêng cho từng vùng nhỏ, giúp nối liền vân tay ngay cả khi bị mờ.
+    # 2. Adaptive Binarization 
+    img_uint8 = (img_norm * 255).astype(np.uint8) 
     binarized = cv2.adaptiveThreshold(
         img_uint8, 
         255, 
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY, # Nền trắng, vân đen -> Dùng THRESH_BINARY. Nếu muốn nền đen vân trắng -> THRESH_BINARY_INV
+        cv2.THRESH_BINARY, 
         blockSize=15, 
         C=5
     )
-    
-    # Bài báo thường show nền trắng, vân đen.
-    # Nếu kết quả ra nền đen, ta đảo ngược lại:
-    # binarized = 255 - binarized
-    
+
     cv2.imwrite(path.replace('.jpg', '_binary.jpg'), binarized)
     print(f"Saved {path}")
     return img_norm, binarized
@@ -68,7 +51,7 @@ def visualize_subbands(subbands, path):
     for i, ax in enumerate(axes.flat):
         if i < len(subbands):
             sb = subbands[i].squeeze().cpu().detach().numpy()
-            # Normalize từng band để nhìn rõ cấu trúc
+            # Normalize từng band
             sb = (sb - sb.min()) / (sb.max() - sb.min() + 1e-8)
             ax.imshow(sb, cmap='gray')
             ax.set_title(f'Band {i}')
@@ -81,9 +64,6 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     img = load_image('fingerprint.jpg', device)
-    if img is None:
-        print("Image not found, creating dummy.")
-        img = torch.rand(1, 1, 256, 256).to(device)
 
     # Sử dụng DFB FFT
     dfb = DirectionalFilterBank(num_bands=8, device=device)

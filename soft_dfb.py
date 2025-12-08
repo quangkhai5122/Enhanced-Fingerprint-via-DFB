@@ -25,16 +25,12 @@ class DirectionalFilterBank(nn.Module):
         for k in range(self.num_bands):
             # Xác định góc trung tâm của band
             center_angle = k * step - np.pi/2 + step/2
-            
-            # Tính khoảng cách góc (ngắn nhất trên vòng tròn)
-            # Dùng cos để đo độ gần: cos(a-b) càng gần 1 thì càng gần trung tâm band
-            # cos(diff) = 1 -> tâm band. cos(diff) < ngưỡng -> ngoài band.
-            
-            # Góc rộng của band là step. Bán kính góc là step/2.
-            # Ta tạo hàm Gaussian hoặc Sigmoid dựa trên khoảng cách tới center_angle
-            
-            # Cách đơn giản: Distance map
-            # diff = min(|a - center|, |a - center + pi|, |a - center - pi|)
+            '''
+            cos(a-b) càng gần 1 thì càng gần trung tâm band
+            cos(diff) = 1 -> tâm band. cos(diff) < ngưỡng -> ngoài band.
+            Góc rộng của band là step. Bán kính góc là step/2.
+            diff = min(|a - center|, |a - center + pi|, |a - center - pi|)
+            '''
             diff = torch.abs(angles - center_angle)
             diff = torch.min(diff, torch.abs(angles - (center_angle + np.pi)))
             diff = torch.min(diff, torch.abs(angles - (center_angle - np.pi)))
@@ -46,7 +42,7 @@ class DirectionalFilterBank(nn.Module):
             
             masks.append(mask.float())
             
-        # Chuẩn hóa để tổng các mask tại mọi điểm = 1 (Partition of Unity)
+        # Chuẩn hóa để tổng các mask tại mọi điểm = 1 
         mask_sum = torch.stack(masks, dim=0).sum(dim=0) + 1e-8
         masks = [m / mask_sum for m in masks]
             
@@ -63,11 +59,9 @@ class DirectionalFilterBank(nn.Module):
         for k in range(self.num_bands):
             mask = self.masks[k].unsqueeze(0).unsqueeze(0)
             fft_masked = fft_x * mask
-            # Lấy phần thực
             sb = torch.real(torch.fft.ifft2(torch.fft.ifftshift(fft_masked)))
             subbands.append(sb)
         return subbands
 
     def inverse(self, subbands):
-        # Cộng gộp tuyến tính
         return torch.stack(subbands, dim=0).sum(dim=0)
